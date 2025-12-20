@@ -1,0 +1,5 @@
+numpy
+pandas
+pyarrow
+matplotlib
+dtat @ git+file:///Users/gameraman/dev/dtat-library@fix/cleanup-dependencies
