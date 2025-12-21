@@ -68,7 +68,7 @@ def parse_time_offset_to_scet(time_str, base_date_str='2025-354T00:00:00'):
 
 
 
-def convert_csv(input_file, output_file):
+def convert_csv(input_file, output_file, min_time=None, max_time=None):
     """
     Convert wide-format CSV to long-format CSV.
 
@@ -80,7 +80,21 @@ def convert_csv(input_file, output_file):
     Output format:
         - Columns: scet, name, value, unit
         - One row per measurement per time point
+
+    Args:
+        input_file: Path to input CSV file
+        output_file: Path to output CSV file
+        min_time: Optional minimum SCET timestamp (ISO 8601 format). Data before this time is excluded.
+        max_time: Optional maximum SCET timestamp (ISO 8601 format). Data after this time is excluded.
     """
+    # Parse time boundaries if provided
+    min_datetime = None
+    max_datetime = None
+
+    if min_time:
+        min_datetime = datetime.strptime(min_time, '%Y-%jT%H:%M:%S')
+    if max_time:
+        max_datetime = datetime.strptime(max_time, '%Y-%jT%H:%M:%S')
     with open(input_file, 'r') as infile:
         reader = csv.reader(infile)
 
@@ -116,6 +130,13 @@ def convert_csv(input_file, output_file):
                 time_value = row[time_col_idx]
                 # Convert time offset to full SCET timestamp
                 scet_timestamp = parse_time_offset_to_scet(time_value)
+                scet_datetime = datetime.strptime(scet_timestamp, '%Y-%jT%H:%M:%S')
+
+                # Apply time filtering
+                if min_datetime and scet_datetime < min_datetime:
+                    continue
+                if max_datetime and scet_datetime > max_datetime:
+                    continue
 
                 # For each data column, write an output row
                 for col_idx, col_name, col_unit in data_columns:
@@ -130,8 +151,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s -i input.csv -o output.csv
-  %(prog)s --input data/24prev.csv --output data/converted.csv
+  Basic conversion:
+    %(prog)s -i input.csv -o output.csv
+    %(prog)s --input data/24prev.csv --output data/converted.csv
+
+  Filter by time range:
+    %(prog)s -i input.csv -o output.csv --min-time 2025-354T12:00:00
+    %(prog)s -i input.csv -o output.csv --max-time 2025-354T18:00:00
+    %(prog)s -i input.csv -o output.csv --min-time 2025-354T12:00:00 --max-time 2025-354T18:00:00
+
+  Extract last 10%% of data (for 24-hour dataset starting at 2025-354T00:00:00):
+    %(prog)s -i 24prev.csv -o output.csv --min-time 2025-354T21:36:00 -v
         """
     )
 
@@ -153,6 +183,20 @@ Examples:
         help='Enable verbose output'
     )
 
+    parser.add_argument(
+        '--min-time',
+        type=str,
+        help='Minimum SCET timestamp (ISO 8601 ordinal format: YYYY-DDDTHH:MM:SS). '
+             'Data before this time will be excluded.'
+    )
+
+    parser.add_argument(
+        '--max-time',
+        type=str,
+        help='Maximum SCET timestamp (ISO 8601 ordinal format: YYYY-DDDTHH:MM:SS). '
+             'Data after this time will be excluded.'
+    )
+
     args = parser.parse_args()
 
     # Expand user paths
@@ -170,9 +214,15 @@ Examples:
     if args.verbose:
         print(f"Converting: {input_path}")
         print(f"Output to: {output_path}")
+        if args.min_time:
+            print(f"Filtering: excluding data before {args.min_time}")
+        if args.max_time:
+            print(f"Filtering: excluding data after {args.max_time}")
 
     try:
-        convert_csv(input_path, output_path)
+        convert_csv(input_path, output_path,
+                   min_time=getattr(args, 'min_time', None),
+                   max_time=getattr(args, 'max_time', None))
         if args.verbose:
             print("Conversion completed successfully!")
     except Exception as e:
