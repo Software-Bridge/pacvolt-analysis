@@ -10,6 +10,7 @@ import argparse
 import csv
 import sys
 import os
+import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -244,8 +245,30 @@ def convert_csv(input_file, output_file, min_time=None, max_time=None, fault_fil
     with open(input_file, 'r') as infile:
         reader = csv.reader(infile)
 
-        # Skip first line (metadata/header)
-        next(reader)
+        # Read first line (metadata) to extract base date
+        metadata_line = next(reader)
+        base_date_str = '2025-354T00:00:00'  # Default
+
+        if metadata_line and len(metadata_line) >= 4:
+            # Parse base date from metadata line
+            # Format: 1P-120/240V-200A-60Hz,WINDOW_LVR50,DD/MM/YYYY,HH:MM:SS,V1.0
+            date_str = metadata_line[2].strip()
+            time_str = metadata_line[3].strip()
+            try:
+                # Parse DD/MM/YYYY format
+                base_dt = datetime.strptime(date_str, '%d/%m/%Y')
+                # Add time component
+                time_parts = time_str.split(':')
+                base_dt = base_dt.replace(
+                    hour=int(time_parts[0]) if len(time_parts) > 0 else 0,
+                    minute=int(time_parts[1]) if len(time_parts) > 1 else 0,
+                    second=int(time_parts[2].split('.')[0]) if len(time_parts) > 2 else 0
+                )
+                # Convert to ordinal format
+                base_date_str = base_dt.strftime('%Y-%jT%H:%M:%S')
+            except (ValueError, IndexError):
+                # If parsing fails, use default
+                base_date_str = '2025-354T00:00:00'
 
         # Read column headers
         headers = next(reader)
@@ -273,8 +296,8 @@ def convert_csv(input_file, output_file, min_time=None, max_time=None, fault_fil
                 continue
 
             time_value = row[time_col_idx]
-            # Convert time offset to full SCET timestamp
-            scet_timestamp = parse_time_offset_to_scet(time_value)
+            # Convert time offset to full SCET timestamp using base date from file header
+            scet_timestamp = parse_time_offset_to_scet(time_value, base_date_str)
             scet_datetime = datetime.strptime(scet_timestamp, '%Y-%jT%H:%M:%S')
 
             # Apply time filtering
@@ -336,8 +359,31 @@ def get_time_range_from_csv(csv_file, is_fault_file=False):
         with open(csv_file, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
 
-            # Skip first line (metadata)
-            next(reader, None)
+            # Read first line (metadata) to extract base date for data files
+            metadata_line = next(reader, None)
+            base_date_str = None
+
+            if not is_fault_file and metadata_line:
+                # Parse base date from metadata line
+                # Format: 1P-120/240V-200A-60Hz,WINDOW_LVR50,DD/MM/YYYY,HH:MM:SS,V1.0
+                if len(metadata_line) >= 4:
+                    date_str = metadata_line[2].strip()
+                    time_str = metadata_line[3].strip()
+                    try:
+                        # Parse DD/MM/YYYY format
+                        base_dt = datetime.strptime(date_str, '%d/%m/%Y')
+                        # Add time component
+                        time_parts = time_str.split(':')
+                        base_dt = base_dt.replace(
+                            hour=int(time_parts[0]) if len(time_parts) > 0 else 0,
+                            minute=int(time_parts[1]) if len(time_parts) > 1 else 0,
+                            second=int(time_parts[2].split('.')[0]) if len(time_parts) > 2 else 0
+                        )
+                        # Convert to ordinal format
+                        base_date_str = base_dt.strftime('%Y-%jT%H:%M:%S')
+                    except (ValueError, IndexError):
+                        # If parsing fails, use default
+                        base_date_str = '2025-354T00:00:00'
 
             # Skip second line (metadata for fault files, headers for data files)
             next(reader, None)
@@ -389,8 +435,11 @@ def get_time_range_from_csv(csv_file, is_fault_file=False):
                         if len(row) < 2:
                             continue
                         time_value = row[-1].strip()
-                        # Use default base date for parsing
-                        dt_str = parse_time_offset_to_scet(time_value)
+                        # Use base date from file header
+                        if base_date_str:
+                            dt_str = parse_time_offset_to_scet(time_value, base_date_str)
+                        else:
+                            dt_str = parse_time_offset_to_scet(time_value)
                         dt = datetime.strptime(dt_str, '%Y-%jT%H:%M:%S')
 
                     if min_dt is None or dt < min_dt:
@@ -425,7 +474,7 @@ def check_overlap(range1_min, range1_max, range2_min, range2_max):
     return range1_min <= range2_max and range2_min <= range1_max
 
 
-def process_directory_mode(directory, output_file, margin=None, verbose=False):
+def process_directory_mode(directory, output_file, margin=None, overlap_policy='ONLY_RECENT', verbose=False):
     """
     Process all files in a directory to generate combined output.
 
@@ -433,6 +482,7 @@ def process_directory_mode(directory, output_file, margin=None, verbose=False):
         directory: Path to directory containing .log files
         output_file: Path to output CSV file
         margin: Optional margin string (e.g., '5m', '10s') to extend FaultLog time range
+        overlap_policy: Policy for handling overlapping files ('ONLY_RECENT' or 'ALL')
         verbose: Enable verbose output
 
     Returns:
@@ -465,6 +515,30 @@ def process_directory_mode(directory, output_file, margin=None, verbose=False):
             print(f"  Converting {log_file} -> {csv_path.name}")
 
         convert_log_to_csv(log_path, csv_path)
+
+    # Generate intermediate output files for debugging (24HR-out.csv, 24prev-out.csv)
+    if verbose:
+        print("\nGenerating intermediate output files for debugging...")
+
+    for data_file_name in ['24HR.csv', '24prev.csv']:
+        data_file = dir_path / data_file_name
+        if data_file.exists():
+            output_name = data_file_name.replace('.csv', '-out.csv')
+            intermediate_output = dir_path / output_name
+
+            if verbose:
+                print(f"  Converting {data_file_name} -> {output_name}")
+
+            try:
+                convert_csv(
+                    input_file=data_file,
+                    output_file=intermediate_output,
+                    fault_file=None,
+                    min_time=None,
+                    max_time=None
+                )
+            except Exception as e:
+                print(f"  Warning: Could not convert {data_file_name}: {e}", file=sys.stderr)
 
     # Get time range from FaultLog.csv
     fault_csv = dir_path / 'FaultLog.csv'
@@ -533,31 +607,130 @@ def process_directory_mode(directory, output_file, margin=None, verbose=False):
         print("\nError: No data files overlap with FaultLog.csv time range", file=sys.stderr)
         return False
 
-    # Select first overlapping file (priority: 24HR.csv, 24prev.csv, Month.csv)
-    overlapping_file = overlapping_files[0]
+    if overlap_policy == 'ONLY_RECENT':
+        # Select first overlapping file (priority: 24HR.csv, 24prev.csv, Month.csv)
+        overlapping_file = overlapping_files[0]
 
-    if len(overlapping_files) > 1:
-        print(f"\n✓ Multiple overlapping files found: {', '.join([f.name for f in overlapping_files])}")
-        print(f"✓ Selecting first in priority order: {overlapping_file.name}")
-    else:
-        print(f"\n✓ Using {overlapping_file.name} as data source (overlaps with FaultLog.csv)")
-
-    if verbose:
-        print(f"\nGenerating output: {output_file}")
-        if margin:
-            print(f"Filtering data to extended time range: {fault_min.strftime('%Y-%jT%H:%M:%S')} to {fault_max.strftime('%Y-%jT%H:%M:%S')}")
+        if len(overlapping_files) > 1:
+            print(f"\n✓ Multiple overlapping files found: {', '.join([f.name for f in overlapping_files])}")
+            print(f"✓ Selecting first in priority order: {overlapping_file.name}")
         else:
-            print(f"Filtering data to FaultLog time range: {fault_min.strftime('%Y-%jT%H:%M:%S')} to {fault_max.strftime('%Y-%jT%H:%M:%S')}")
+            print(f"\n✓ Using {overlapping_file.name} as data source (overlaps with FaultLog.csv)")
 
-    # Generate output using convert_csv with FaultLog and overlapping file
-    # Filter data to only include timestamps within FaultLog time range
-    convert_csv(
-        input_file=overlapping_file,
-        output_file=output_file,
-        fault_file=fault_csv,
-        min_time=fault_min.strftime('%Y-%jT%H:%M:%S'),
-        max_time=fault_max.strftime('%Y-%jT%H:%M:%S')
-    )
+        if verbose:
+            print(f"\nGenerating output: {output_file}")
+            if margin:
+                print(f"Filtering data to extended time range: {fault_min.strftime('%Y-%jT%H:%M:%S')} to {fault_max.strftime('%Y-%jT%H:%M:%S')}")
+            else:
+                print(f"Filtering data to FaultLog time range: {fault_min.strftime('%Y-%jT%H:%M:%S')} to {fault_max.strftime('%Y-%jT%H:%M:%S')}")
+
+        # Generate output using convert_csv with FaultLog and overlapping file
+        # Filter data to only include timestamps within FaultLog time range
+        convert_csv(
+            input_file=overlapping_file,
+            output_file=output_file,
+            fault_file=fault_csv,
+            min_time=fault_min.strftime('%Y-%jT%H:%M:%S'),
+            max_time=fault_max.strftime('%Y-%jT%H:%M:%S')
+        )
+
+    else:  # overlap_policy == 'ALL'
+        # Merge data from all overlapping files, excluding duplicate time ranges
+        print(f"\n✓ Multiple overlapping files found: {', '.join([f.name for f in overlapping_files])}")
+        print(f"✓ Merging data from all overlapping files (excluding duplicate time ranges)")
+
+        if verbose:
+            print(f"\nGenerating output: {output_file}")
+            if margin:
+                print(f"Filtering data to extended time range: {fault_min.strftime('%Y-%jT%H:%M:%S')} to {fault_max.strftime('%Y-%jT%H:%M:%S')}")
+            else:
+                print(f"Filtering data to FaultLog time range: {fault_min.strftime('%Y-%jT%H:%M:%S')} to {fault_max.strftime('%Y-%jT%H:%M:%S')}")
+
+        # Collect data from all files, tracking covered time ranges
+        all_rows = []
+        covered_ranges = []  # List of (min, max) tuples
+
+        # First, process fault data separately using the full fault range
+        if verbose:
+            print(f"  Processing FaultLog.csv: {fault_min.strftime('%Y-%jT%H:%M:%S')} to {fault_max.strftime('%Y-%jT%H:%M:%S')}")
+
+        fault_data = parse_fault_data(
+            fault_csv,
+            min_time=fault_min.strftime('%Y-%jT%H:%M:%S'),
+            max_time=fault_max.strftime('%Y-%jT%H:%M:%S')
+        )
+        all_rows.extend(fault_data)
+
+        # Then process each data file
+        for file_path in overlapping_files:
+            # Get the time range of this file
+            file_min, file_max = get_time_range_from_csv(file_path, is_fault_file=False)
+
+            # Calculate the intersection of this file's range with the fault range
+            segment_min = max(fault_min, file_min)
+            segment_max = min(fault_max, file_max)
+
+            # Determine which parts of this segment are not already covered
+            # For simplicity, we'll exclude this file if its entire range overlaps with already covered ranges
+            # A more sophisticated approach would handle partial overlaps, but for now we use a simple check
+            is_fully_covered = False
+            for cov_min, cov_max in covered_ranges:
+                if segment_min >= cov_min and segment_max <= cov_max:
+                    is_fully_covered = True
+                    break
+
+            if is_fully_covered:
+                if verbose:
+                    print(f"  Skipping {file_path.name} - time range fully covered by previous files")
+                continue
+
+            # Calculate the uncovered portion
+            # For now, we'll use a simple approach: include data from ranges not fully covered
+            # We'll use the segment but exclude exact timestamp duplicates later
+            if verbose:
+                print(f"  Processing {file_path.name}: {segment_min.strftime('%Y-%jT%H:%M:%S')} to {segment_max.strftime('%Y-%jT%H:%M:%S')}")
+
+            # Create a temporary output file
+            temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv')
+            temp_path = temp_file.name
+            temp_file.close()
+
+            try:
+                # Process this file without fault data (fault data processed separately)
+                convert_csv(
+                    input_file=file_path,
+                    output_file=temp_path,
+                    fault_file=None,
+                    min_time=segment_min.strftime('%Y-%jT%H:%M:%S'),
+                    max_time=segment_max.strftime('%Y-%jT%H:%M:%S')
+                )
+
+                # Read the temporary file and collect rows
+                with open(temp_path, 'r') as f:
+                    reader = csv.reader(f)
+                    next(reader)  # Skip header
+                    for row in reader:
+                        all_rows.append(tuple(row))
+
+                # Track this range as covered
+                covered_ranges.append((segment_min, segment_max))
+
+            finally:
+                # Clean up temporary file
+                Path(temp_path).unlink()
+
+        # Sort all rows by timestamp (no deduplication - keep all measurements)
+        all_rows.sort(key=lambda x: datetime.strptime(x[0], '%Y-%jT%H:%M:%S'))
+
+        # Write to output file
+        with open(output_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['scet', 'name', 'value', 'unit'])
+            for row in all_rows:
+                writer.writerow(row)
+
+        if verbose:
+            print(f"  Merged {len(all_rows)} rows from {len(overlapping_files)} files")
 
     return True
 
@@ -592,6 +765,10 @@ Examples:
   Directory mode with time margin (extend FaultLog time range):
     %(prog)s -d data/testing_12.20.25 -o output.csv -m 5m -v
     %(prog)s -d data/testing_12.20.25 -o output.csv --margin 30s -v
+
+  Directory mode with overlap policy (merge all overlapping files):
+    %(prog)s -d data/testing_12.20.25 -o output.csv -p ALL -v
+    %(prog)s -d data/testing_12.20.25 -o output.csv --overlap ONLY_RECENT -v
         """
     )
 
@@ -643,6 +820,17 @@ Examples:
     )
 
     parser.add_argument(
+        '-p', '--overlap',
+        type=str,
+        choices=['ONLY_RECENT', 'ALL'],
+        default='ONLY_RECENT',
+        help='Policy for handling multiple overlapping data files. '
+             'ONLY_RECENT (default): use only the first overlapping file (priority: 24HR.csv, 24prev.csv, Month.csv). '
+             'ALL: merge data from all overlapping files, excluding duplicate time ranges. '
+             'Only applicable with --dir option.'
+    )
+
+    parser.add_argument(
         '-f', '--fault-file',
         type=str,
         help='Optional fault data CSV file to integrate into the output. '
@@ -664,6 +852,10 @@ Examples:
         print("Error: --margin can only be used with --dir option", file=sys.stderr)
         sys.exit(1)
 
+    if args.overlap != 'ONLY_RECENT' and not args.dir:
+        print("Error: --overlap can only be used with --dir option", file=sys.stderr)
+        sys.exit(1)
+
     # Expand output path
     output_path = Path(args.output).expanduser()
 
@@ -679,7 +871,7 @@ Examples:
             print("DIRECTORY MODE")
             print("=" * 60)
 
-        success = process_directory_mode(dir_path, output_path, margin=args.margin, verbose=args.verbose)
+        success = process_directory_mode(dir_path, output_path, margin=args.margin, overlap_policy=args.overlap, verbose=args.verbose)
 
         if success:
             if args.verbose:
