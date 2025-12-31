@@ -105,6 +105,127 @@ def parse_margin(margin_str):
         raise ValueError(f"Invalid margin format: {margin_str}. Expected format: '#s' or '#m' (e.g., '10s' or '5m')")
 
 
+def identify_fault_clusters(fault_data, cluster_threshold_minutes=10):
+    """
+    Identify fault clusters based on time proximity.
+
+    Faults within the threshold time of each other are grouped into the same cluster.
+
+    Args:
+        fault_data: List of fault data tuples (scet, name, value, unit)
+        cluster_threshold_minutes: Maximum time gap (in minutes) between faults in the same cluster
+
+    Returns:
+        List of dictionaries, each containing:
+            - 'min_time': earliest fault timestamp in cluster (datetime)
+            - 'max_time': latest fault timestamp in cluster (datetime)
+            - 'fault_count': number of faults in cluster
+    """
+    if not fault_data:
+        return []
+
+    # Extract unique fault timestamps (sorted)
+    fault_timestamps = []
+    for row in fault_data:
+        scet = row[0]  # First element is the timestamp
+        try:
+            dt = datetime.strptime(scet, '%Y-%jT%H:%M:%S')
+            if dt not in fault_timestamps:
+                fault_timestamps.append(dt)
+        except ValueError:
+            continue
+
+    fault_timestamps.sort()
+
+    if not fault_timestamps:
+        return []
+
+    # Identify clusters
+    clusters = []
+    current_cluster_start = fault_timestamps[0]
+    current_cluster_end = fault_timestamps[0]
+    fault_count = 1
+
+    threshold = timedelta(minutes=cluster_threshold_minutes)
+
+    for i in range(1, len(fault_timestamps)):
+        time_gap = fault_timestamps[i] - fault_timestamps[i-1]
+
+        if time_gap <= threshold:
+            # Part of current cluster
+            current_cluster_end = fault_timestamps[i]
+            fault_count += 1
+        else:
+            # Start new cluster
+            clusters.append({
+                'min_time': current_cluster_start,
+                'max_time': current_cluster_end,
+                'fault_count': fault_count
+            })
+            current_cluster_start = fault_timestamps[i]
+            current_cluster_end = fault_timestamps[i]
+            fault_count = 1
+
+    # Add the last cluster
+    clusters.append({
+        'min_time': current_cluster_start,
+        'max_time': current_cluster_end,
+        'fault_count': fault_count
+    })
+
+    return clusters
+
+
+def filter_data_by_clusters(all_rows, fault_clusters, margin_delta=None):
+    """
+    Filter data rows to only include those within fault cluster time ranges (with optional margin).
+
+    Args:
+        all_rows: List of data rows (tuples of scet, name, value, unit)
+        fault_clusters: List of fault cluster dictionaries with 'min_time' and 'max_time'
+        margin_delta: Optional timedelta to extend cluster ranges
+
+    Returns:
+        Filtered list of rows
+    """
+    if not fault_clusters:
+        return all_rows
+
+    # Build extended cluster ranges
+    cluster_ranges = []
+    for cluster in fault_clusters:
+        min_time = cluster['min_time']
+        max_time = cluster['max_time']
+
+        if margin_delta:
+            min_time = min_time - margin_delta
+            max_time = max_time + margin_delta
+
+        cluster_ranges.append((min_time, max_time))
+
+    # Filter rows
+    filtered_rows = []
+    for row in all_rows:
+        scet = row[0]
+        try:
+            row_time = datetime.strptime(scet, '%Y-%jT%H:%M:%S')
+
+            # Check if row time is within any cluster range
+            in_range = False
+            for min_time, max_time in cluster_ranges:
+                if min_time <= row_time <= max_time:
+                    in_range = True
+                    break
+
+            if in_range:
+                filtered_rows.append(row)
+        except ValueError:
+            # Keep rows with invalid timestamps
+            filtered_rows.append(row)
+
+    return filtered_rows
+
+
 def parse_fault_data(fault_file, min_time=None, max_time=None):
     """
     Parse fault data from a CSV file.
@@ -474,15 +595,16 @@ def check_overlap(range1_min, range1_max, range2_min, range2_max):
     return range1_min <= range2_max and range2_min <= range1_max
 
 
-def process_directory_mode(directory, output_file, margin=None, overlap_policy='ONLY_RECENT', verbose=False):
+def process_directory_mode(directory, output_file, margin=None, overlap_policy='ONLY_RECENT', exclude_policy='NONE', verbose=False):
     """
     Process all files in a directory to generate combined output.
 
     Args:
         directory: Path to directory containing .log files
         output_file: Path to output CSV file
-        margin: Optional margin string (e.g., '5m', '10s') to extend FaultLog time range
+        margin: Optional margin string (e.g., '5m', '10s') to extend time ranges
         overlap_policy: Policy for handling overlapping files ('ONLY_RECENT' or 'ALL')
+        exclude_policy: Policy for excluding data ('NONE' or 'ALL')
         verbose: Enable verbose output
 
     Returns:
@@ -624,6 +746,22 @@ def process_directory_mode(directory, output_file, margin=None, overlap_policy='
             else:
                 print(f"Filtering data to FaultLog time range: {fault_min.strftime('%Y-%jT%H:%M:%S')} to {fault_max.strftime('%Y-%jT%H:%M:%S')}")
 
+        # Identify fault clusters for analysis
+        fault_data = parse_fault_data(
+            fault_csv,
+            min_time=fault_min.strftime('%Y-%jT%H:%M:%S'),
+            max_time=fault_max.strftime('%Y-%jT%H:%M:%S')
+        )
+        fault_clusters = identify_fault_clusters(fault_data)
+
+        if verbose and fault_clusters:
+            print(f"\n  Identified {len(fault_clusters)} fault cluster(s):")
+            for i, cluster in enumerate(fault_clusters, 1):
+                duration = cluster['max_time'] - cluster['min_time']
+                duration_str = str(duration).split('.')[0]  # Remove microseconds
+                print(f"    Cluster {i}: {cluster['min_time'].strftime('%Y-%jT%H:%M:%S')} to {cluster['max_time'].strftime('%Y-%jT%H:%M:%S')}")
+                print(f"              Duration: {duration_str}, Faults: {cluster['fault_count']}")
+
         # Generate output using convert_csv with FaultLog and overlapping file
         # Filter data to only include timestamps within FaultLog time range
         convert_csv(
@@ -633,6 +771,42 @@ def process_directory_mode(directory, output_file, margin=None, overlap_policy='
             min_time=fault_min.strftime('%Y-%jT%H:%M:%S'),
             max_time=fault_max.strftime('%Y-%jT%H:%M:%S')
         )
+
+        # Apply exclusion policy if specified
+        if exclude_policy == 'ALL' and fault_clusters:
+            margin_delta = None
+            if margin:
+                try:
+                    margin_delta = parse_margin(margin)
+                except ValueError:
+                    pass  # Already handled earlier
+
+            # Read the output file
+            all_rows = []
+            with open(output_file, 'r') as f:
+                reader = csv.reader(f)
+                next(reader)  # Skip header
+                for row in reader:
+                    all_rows.append(tuple(row))
+
+            original_count = len(all_rows)
+
+            # Filter data
+            all_rows = filter_data_by_clusters(all_rows, fault_clusters, margin_delta)
+
+            # Write filtered data back
+            with open(output_file, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['scet', 'name', 'value', 'unit'])
+                for row in all_rows:
+                    writer.writerow(row)
+
+            if verbose:
+                excluded_count = original_count - len(all_rows)
+                print(f"\n  Data exclusion applied:")
+                print(f"    Original rows: {original_count:,}")
+                print(f"    Excluded rows: {excluded_count:,} ({100*excluded_count/original_count:.1f}%)")
+                print(f"    Remaining rows: {len(all_rows):,}")
 
     else:  # overlap_policy == 'ALL'
         # Merge data from all overlapping files, excluding duplicate time ranges
@@ -660,6 +834,17 @@ def process_directory_mode(directory, output_file, margin=None, overlap_policy='
             max_time=fault_max.strftime('%Y-%jT%H:%M:%S')
         )
         all_rows.extend(fault_data)
+
+        # Identify fault clusters
+        fault_clusters = identify_fault_clusters(fault_data)
+
+        if verbose and fault_clusters:
+            print(f"\n  Identified {len(fault_clusters)} fault cluster(s):")
+            for i, cluster in enumerate(fault_clusters, 1):
+                duration = cluster['max_time'] - cluster['min_time']
+                duration_str = str(duration).split('.')[0]  # Remove microseconds
+                print(f"    Cluster {i}: {cluster['min_time'].strftime('%Y-%jT%H:%M:%S')} to {cluster['max_time'].strftime('%Y-%jT%H:%M:%S')}")
+                print(f"              Duration: {duration_str}, Faults: {cluster['fault_count']}")
 
         # Then process each data file
         for file_path in overlapping_files:
@@ -719,6 +904,25 @@ def process_directory_mode(directory, output_file, margin=None, overlap_policy='
                 # Clean up temporary file
                 Path(temp_path).unlink()
 
+        # Apply exclusion policy if specified
+        if exclude_policy == 'ALL' and fault_clusters:
+            margin_delta = None
+            if margin:
+                try:
+                    margin_delta = parse_margin(margin)
+                except ValueError:
+                    pass  # Already handled earlier
+
+            original_count = len(all_rows)
+            all_rows = filter_data_by_clusters(all_rows, fault_clusters, margin_delta)
+
+            if verbose:
+                excluded_count = original_count - len(all_rows)
+                print(f"\n  Data exclusion applied:")
+                print(f"    Original rows: {original_count:,}")
+                print(f"    Excluded rows: {excluded_count:,} ({100*excluded_count/original_count:.1f}%)")
+                print(f"    Remaining rows: {len(all_rows):,}")
+
         # Sort all rows by timestamp (no deduplication - keep all measurements)
         all_rows.sort(key=lambda x: datetime.strptime(x[0], '%Y-%jT%H:%M:%S'))
 
@@ -769,6 +973,10 @@ Examples:
   Directory mode with overlap policy (merge all overlapping files):
     %(prog)s -d data/testing_12.20.25 -o output.csv -p ALL -v
     %(prog)s -d data/testing_12.20.25 -o output.csv --overlap ONLY_RECENT -v
+
+  Directory mode with data exclusion (only include data near fault clusters):
+    %(prog)s -d data/testing_12.20.25 -o output.csv -e ALL -v
+    %(prog)s -d data/testing_12.20.25 -o output.csv -e ALL -m 5m -v
         """
     )
 
@@ -831,6 +1039,17 @@ Examples:
     )
 
     parser.add_argument(
+        '-e', '--exclude',
+        type=str,
+        choices=['NONE', 'ALL'],
+        default='NONE',
+        help='Data exclusion policy based on fault clusters. '
+             'NONE (default): include all data within FaultLog time range. '
+             'ALL: exclude data outside fault cluster time ranges (with optional --margin). '
+             'Only applicable with --dir option.'
+    )
+
+    parser.add_argument(
         '-f', '--fault-file',
         type=str,
         help='Optional fault data CSV file to integrate into the output. '
@@ -856,6 +1075,10 @@ Examples:
         print("Error: --overlap can only be used with --dir option", file=sys.stderr)
         sys.exit(1)
 
+    if args.exclude != 'NONE' and not args.dir:
+        print("Error: --exclude can only be used with --dir option", file=sys.stderr)
+        sys.exit(1)
+
     # Expand output path
     output_path = Path(args.output).expanduser()
 
@@ -871,7 +1094,7 @@ Examples:
             print("DIRECTORY MODE")
             print("=" * 60)
 
-        success = process_directory_mode(dir_path, output_path, margin=args.margin, overlap_policy=args.overlap, verbose=args.verbose)
+        success = process_directory_mode(dir_path, output_path, margin=args.margin, overlap_policy=args.overlap, exclude_policy=args.exclude, verbose=args.verbose)
 
         if success:
             if args.verbose:
