@@ -3,4 +3,5 @@ pandas
 pyarrow
 matplotlib
 flask
-dtat @ git+file:///Users/gameraman/dev/dtat-library@fix/cleanup-dependencies
+dtat @ git+https://github.com/NASA-JPL-Spacecraft-Analysis/dtat-library.git
+# dtat @ git+file:///Users/gameraman/dev/dtat-library@fix/cleanup-dependencies
