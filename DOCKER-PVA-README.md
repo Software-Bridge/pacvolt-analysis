@@ -18,6 +18,10 @@ This Dockerized version includes all original pva.py features plus:
 **On PC (Windows):**
 - Docker Desktop for Windows installed and running
 - Git (to clone/transfer the files)
+- **Important:** Docker Desktop must have file sharing enabled for your drives
+  - Open Docker Desktop → Settings → Resources → File Sharing
+  - Ensure the drive containing your data (typically C:) is checked/enabled
+  - Click "Apply & Restart" if you make changes
 
 **On Mac (Development):**
 - Docker Desktop for Mac installed and running
@@ -164,10 +168,17 @@ All pva.py options are supported:
 
 ### Windows (run-pva.bat)
 
-- **Absolute paths**: Use Windows format
-  - `C:\Users\name\data\file.csv`
+- **Absolute paths**: Use Windows format with drive letter
+  - Example: `C:\Users\YourName\data\file.csv`
+  - The script automatically converts these to Docker format
+  - Paths starting with `%USERPROFILE%` are mounted as `/home/user` in the container
 - **Relative paths**: Work from current directory
-  - `data\file.csv`
+  - Example: `data\file.csv` → works if data folder is in current directory
+- **Important Notes:**
+  - Always use backslashes `\` for Windows paths (not forward slashes `/`)
+  - Paths must be on a drive that Docker Desktop has file sharing enabled for
+  - UNC paths (`\\server\share`) are not supported - copy data locally first
+  - Spaces in paths are OK: `C:\Program Files\data\file.csv`
 
 ## Troubleshooting
 
@@ -202,6 +213,21 @@ All pva.py options are supported:
 ### Permission denied errors
 - On Mac/Linux: Ensure run-pva.sh is executable (`chmod +x run-pva.sh`)
 - Verify Docker has file sharing enabled for the directories you're accessing
+
+### Directory not found (Windows)
+- **Error:** "Directory not found" even though the directory exists
+- **Causes:**
+  1. Docker Desktop file sharing not enabled for the drive
+  2. Path uses UNC paths (\\server\share) - Docker doesn't support these
+  3. Directory is on a network drive - may need additional configuration
+- **Solutions:**
+  1. Enable file sharing in Docker Desktop:
+     - Open Docker Desktop → Settings → Resources → File Sharing
+     - Add the drive containing your data (e.g., C:)
+     - Click "Apply & Restart"
+  2. Move data to a local drive (C:, D:, etc.) if it's on a network share
+  3. Try using full paths: `run-pva.bat -d C:\Users\YourName\data -o output.csv`
+  4. Ensure you're using Windows paths (backslashes) in the command, not Unix paths
 
 ## Data File Requirements
 
