@@ -14,11 +14,19 @@ RUN apt-get update && \
 # Set working directory
 WORKDIR /app
 
+# Copy the dtat library first (relative to build context)
+# Expected structure: dtat-library/ directory in the same location as Dockerfile.pva
+COPY dtat-library/ /app/dtat-library/
+
 # Copy the application
 COPY pva.py .
 
-# Install Flask
-RUN pip3 install flask
+# Install Python dependencies
+RUN pip3 install flask pandas plotly nbformat pytest
+
+# Install dtat library by copying directly to site-packages
+# This avoids setuptools_scm version detection issues
+RUN cp -r /app/dtat-library/dtat /usr/local/lib/python3.10/dist-packages/
 
 # Create directory for data
 RUN mkdir -p /data /output

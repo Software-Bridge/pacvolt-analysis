@@ -18,6 +18,8 @@ import webbrowser
 import threading
 import time
 from io import StringIO
+import warnings
+warnings.filterwarnings('ignore')
 
 
 def open_csv_file(file_path):
@@ -965,7 +967,66 @@ def process_directory_mode(directory, output_file, margin=None, overlap_policy='
     return True
 
 
-def generate_summary_html(input_files, output_file, fault_file=None):
+def create_plot_html(output_file):
+    """
+    Create an interactive plot of the output data using dtat/plotly.
+
+    Args:
+        output_file: Path to the output CSV file
+
+    Returns:
+        HTML string containing the plot, or None if plotting fails
+    """
+    try:
+        # Import plotting libraries (optional dependencies)
+        import pandas as pd
+        import dtat
+        import dtat.plot as dtatplot
+        from dtat.dataconnectors.csvconnector import CSVConnector
+        from dtat.types import CustomizedTrace
+        import plotly.io as pio
+
+        # Check if output file exists and has data
+        if not Path(output_file).exists():
+            return None
+
+        # Load data using dtat CSV connector
+        data_for_set = CSVConnector(str(output_file)).get_data()
+
+        # Create the stacked graph
+        fig, c, m, t = dtatplot.make_stacked_graph(
+            data_for_set,
+            x_var="scet",
+            y_vars=[["AvgVin", "AvgVout"], ["Fault"], ["AvgAmps"], ["Avg_kVA"], ["Avg_kW"]],
+            customize_dict={
+                'AvgVin': CustomizedTrace(
+                    color='red',
+                ),
+                'Fault': CustomizedTrace(
+                    size=12,
+                    symbol='diamond',
+                    color='red',
+                    plot_lines=False
+                )
+            }
+        )
+
+        # Convert plot to HTML (include plotlyjs to make it self-contained)
+        plot_html = fig.to_html(include_plotlyjs='cdn', full_html=False)
+
+        return plot_html
+
+    except ImportError as e:
+        # dtat or plotly not available
+        print(f"Warning: Plotting libraries not available: {e}", file=sys.stderr)
+        return None
+    except Exception as e:
+        # Any other error during plotting
+        print(f"Warning: Could not create plot: {e}", file=sys.stderr)
+        return None
+
+
+def generate_summary_html(input_files, output_file, fault_file=None, plot_html=None):
     """
     Generate HTML page showing input and output files.
 
@@ -989,10 +1050,31 @@ def generate_summary_html(input_files, output_file, fault_file=None):
     if fault_file:
         fault_abs = Path(fault_file).absolute()
         fault_section = f"""
-<div style="margin-bottom: 20px;">
-    <strong>Fault File:</strong><br>
-    {fault_abs}
+<div class="section">
+    <strong>Fault File:</strong>
+    <div class="file-path">
+        {fault_abs}
+    </div>
 </div>
+"""
+
+    # Add plot section if plot HTML is provided
+    plot_section = ""
+    if plot_html:
+        plot_section = f"""
+        <div style="margin-top: 40px; font-size: 14px; opacity: 0.8;">
+            Processing completed successfully!
+        </div>
+        <div style="margin-top: 30px; background: white; padding: 20px; border-radius: 10px;">
+            <h2 style="color: #333; margin-top: 0;">Data Visualization</h2>
+            {plot_html}
+        </div>
+"""
+    else:
+        plot_section = """
+        <div style="margin-top: 40px; font-size: 14px; opacity: 0.8;">
+            Processing completed successfully!
+        </div>
 """
 
     html = f"""
@@ -1054,9 +1136,7 @@ def generate_summary_html(input_files, output_file, fault_file=None):
             </div>
         </div>
 
-        <div style="margin-top: 40px; font-size: 14px; opacity: 0.8;">
-            Processing completed successfully!
-        </div>
+        {plot_section}
     </div>
 </body>
 </html>
@@ -1064,19 +1144,20 @@ def generate_summary_html(input_files, output_file, fault_file=None):
     return html
 
 
-def start_web_server(input_files, output_file, fault_file=None, port=5000):
+def start_web_server(input_files, output_file, fault_file=None, plot_html=None, port=5000):
     """
-    Start a Flask web server to display file summary.
+    Start a Flask web server to display file summary and plot.
 
     Args:
         input_files: List of input file paths
         output_file: Output file path
         fault_file: Optional fault file path
+        plot_html: Optional HTML string containing the plot
         port: Port to run the server on (default 5000)
     """
     app = Flask(__name__)
 
-    html_content = generate_summary_html(input_files, output_file, fault_file)
+    html_content = generate_summary_html(input_files, output_file, fault_file, plot_html)
 
     @app.route('/')
     def summary():
@@ -1287,7 +1368,16 @@ Examples:
 
             # Start web server unless --no-browser is specified
             if not args.no_browser:
-                start_web_server(input_files, output_path, fault_file=fault_file, port=5000)
+                # Create plot HTML if output file exists
+                if args.verbose:
+                    print("\nGenerating data visualization...")
+                plot_html = create_plot_html(output_path)
+                if plot_html and args.verbose:
+                    print("  ✓ Plot created successfully")
+                elif args.verbose:
+                    print("  Note: Plot generation skipped (dependencies may not be installed)")
+
+                start_web_server(input_files, output_path, fault_file=fault_file, plot_html=plot_html, port=5000)
 
             sys.exit(0)
         else:
@@ -1331,7 +1421,16 @@ Examples:
 
             # Start web server unless --no-browser is specified
             if not args.no_browser:
-                start_web_server([input_path], output_path, fault_file=fault_path, port=5000)
+                # Create plot HTML if output file exists
+                if args.verbose:
+                    print("\nGenerating data visualization...")
+                plot_html = create_plot_html(output_path)
+                if plot_html and args.verbose:
+                    print("  ✓ Plot created successfully")
+                elif args.verbose:
+                    print("  Note: Plot generation skipped (dependencies may not be installed)")
+
+                start_web_server([input_path], output_path, fault_file=fault_path, plot_html=plot_html, port=5000)
 
         except Exception as e:
             print(f"Error during conversion: {e}", file=sys.stderr)
