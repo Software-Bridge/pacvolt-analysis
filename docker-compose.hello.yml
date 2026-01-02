@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  hello-world:
+    build:
+      context: .
+      dockerfile: Dockerfile.hello
+    container_name: hello-world-app
+    ports:
+      - "8081:5000"
+    restart: unless-stopped
