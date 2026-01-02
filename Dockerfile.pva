@@ -1,0 +1,31 @@
+# Use Ubuntu as base image
+FROM ubuntu:22.04
+
+# Avoid prompts from apt
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Update and install Python 3 and pip
+RUN apt-get update && \
+    apt-get install -y \
+    python3 \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Copy the application
+COPY pva.py .
+
+# Install Flask
+RUN pip3 install flask
+
+# Create directory for data
+RUN mkdir -p /data /output
+
+# Expose port 5000 for web interface
+EXPOSE 5000
+
+# Default command (can be overridden)
+ENTRYPOINT ["python3", "pva.py"]
+CMD ["--help"]

@@ -2,4 +2,5 @@ numpy
 pandas
 pyarrow
 matplotlib
+flask
 dtat @ git+file:///Users/gameraman/dev/dtat-library@fix/cleanup-dependencies

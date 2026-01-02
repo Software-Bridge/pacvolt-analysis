@@ -13,6 +13,35 @@ import os
 import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta
+from flask import Flask
+import webbrowser
+import threading
+import time
+from io import StringIO
+
+
+def open_csv_file(file_path):
+    """
+    Open a CSV file and return a csv.reader, filtering out NUL bytes.
+
+    This is necessary because Docker volume mounts on some systems can introduce
+    NUL bytes when reading files, which causes csv.reader to fail.
+
+    Args:
+        file_path: Path to the CSV file
+
+    Returns:
+        csv.reader object
+    """
+    # Read the file and filter out NUL bytes
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        content = f.read()
+
+    # Remove NUL bytes
+    content = content.replace('\x00', '')
+
+    # Create a StringIO object and return a csv.reader
+    return csv.reader(StringIO(content))
 
 
 def extract_unit_from_column_name(column_name):
@@ -249,83 +278,82 @@ def parse_fault_data(fault_file, min_time=None, max_time=None):
     if max_time:
         max_datetime = datetime.strptime(max_time, '%Y-%jT%H:%M:%S')
 
-    with open(fault_file, 'r', encoding='utf-8') as f:
-        reader = csv.reader(f)
+    reader = open_csv_file(fault_file)
 
-        # Skip first line (metadata)
-        next(reader)
+    # Skip first line (metadata)
+    next(reader)
 
-        # Skip second line (metadata for fault files, may vary)
-        next(reader)
+    # Skip second line (metadata for fault files, may vary)
+    next(reader)
 
-        # Skip third line (column headers)
-        next(reader)
+    # Skip third line (column headers)
+    next(reader)
 
-        # Process fault data rows
-        for row in reader:
-            if not row or len(row) < 4:
-                continue
+    # Process fault data rows
+    for row in reader:
+        if not row or len(row) < 4:
+            continue
 
-            # Column 2 and 3 combine to make scet timestamp
-            # Column 4 is the value
-            date_part = row[1].strip()  # Column 2 (0-indexed: column 1)
-            time_part = row[2].strip()  # Column 3 (0-indexed: column 2)
-            value = row[3].strip()       # Column 4 (0-indexed: column 3)
+        # Column 2 and 3 combine to make scet timestamp
+        # Column 4 is the value
+        date_part = row[1].strip()  # Column 2 (0-indexed: column 1)
+        time_part = row[2].strip()  # Column 3 (0-indexed: column 2)
+        value = row[3].strip()       # Column 4 (0-indexed: column 3)
 
-            # Parse and normalize to SCET format (YYYY-DDDTHH:MM:SS)
-            try:
-                # Try parsing as ordinal date format (YYYY-DDD)
-                if 'T' in date_part:
-                    # Already combined format
-                    scet_datetime = datetime.strptime(f"{date_part}", '%Y-%jT%H:%M:%S')
-                elif '-' in date_part and len(date_part.split('-')) == 2:
-                    # Ordinal date format: "2025-354"
-                    scet_datetime = datetime.strptime(f"{date_part}T{time_part}", '%Y-%jT%H:%M:%S')
-                elif '/' in date_part:
-                    # Calendar date format: "12/20/2025" or "2025/12/20"
-                    # Try MM/DD/YYYY format first
+        # Parse and normalize to SCET format (YYYY-DDDTHH:MM:SS)
+        try:
+            # Try parsing as ordinal date format (YYYY-DDD)
+            if 'T' in date_part:
+                # Already combined format
+                scet_datetime = datetime.strptime(f"{date_part}", '%Y-%jT%H:%M:%S')
+            elif '-' in date_part and len(date_part.split('-')) == 2:
+                # Ordinal date format: "2025-354"
+                scet_datetime = datetime.strptime(f"{date_part}T{time_part}", '%Y-%jT%H:%M:%S')
+            elif '/' in date_part:
+                # Calendar date format: "12/20/2025" or "2025/12/20"
+                # Try MM/DD/YYYY format first
+                try:
+                    dt = datetime.strptime(date_part, '%m/%d/%Y')
+                except ValueError:
+                    # Try DD/MM/YYYY format
                     try:
-                        dt = datetime.strptime(date_part, '%m/%d/%Y')
+                        dt = datetime.strptime(date_part, '%d/%m/%Y')
                     except ValueError:
-                        # Try DD/MM/YYYY format
-                        try:
-                            dt = datetime.strptime(date_part, '%d/%m/%Y')
-                        except ValueError:
-                            # Try YYYY/MM/DD format
-                            dt = datetime.strptime(date_part, '%Y/%m/%d')
+                        # Try YYYY/MM/DD format
+                        dt = datetime.strptime(date_part, '%Y/%m/%d')
 
-                    # Parse time and combine
-                    time_parts = time_part.split(':')
-                    scet_datetime = dt.replace(
-                        hour=int(time_parts[0]),
-                        minute=int(time_parts[1]),
-                        second=int(time_parts[2].split('.')[0]) if len(time_parts) > 2 else 0
-                    )
-                else:
-                    # Try ISO format YYYY-MM-DD
-                    dt = datetime.strptime(date_part, '%Y-%m-%d')
-                    time_parts = time_part.split(':')
-                    scet_datetime = dt.replace(
-                        hour=int(time_parts[0]),
-                        minute=int(time_parts[1]),
-                        second=int(time_parts[2].split('.')[0]) if len(time_parts) > 2 else 0
-                    )
+                # Parse time and combine
+                time_parts = time_part.split(':')
+                scet_datetime = dt.replace(
+                    hour=int(time_parts[0]),
+                    minute=int(time_parts[1]),
+                    second=int(time_parts[2].split('.')[0]) if len(time_parts) > 2 else 0
+                )
+            else:
+                # Try ISO format YYYY-MM-DD
+                dt = datetime.strptime(date_part, '%Y-%m-%d')
+                time_parts = time_part.split(':')
+                scet_datetime = dt.replace(
+                    hour=int(time_parts[0]),
+                    minute=int(time_parts[1]),
+                    second=int(time_parts[2].split('.')[0]) if len(time_parts) > 2 else 0
+                )
 
-                # Format as ISO 8601 ordinal date: YYYY-DDDTHH:MM:SS
-                scet_timestamp = scet_datetime.strftime('%Y-%jT%H:%M:%S')
+            # Format as ISO 8601 ordinal date: YYYY-DDDTHH:MM:SS
+            scet_timestamp = scet_datetime.strftime('%Y-%jT%H:%M:%S')
 
-                # Apply time filtering if specified
-                if min_datetime and scet_datetime < min_datetime:
-                    continue
-                if max_datetime and scet_datetime > max_datetime:
-                    continue
-
-                # Add fault row: (scet, name, value, unit)
-                fault_rows.append((scet_timestamp, 'Fault', value, 'none'))
-
-            except (ValueError, IndexError):
-                # Skip rows with invalid timestamps
+            # Apply time filtering if specified
+            if min_datetime and scet_datetime < min_datetime:
                 continue
+            if max_datetime and scet_datetime > max_datetime:
+                continue
+
+            # Add fault row: (scet, name, value, unit)
+            fault_rows.append((scet_timestamp, 'Fault', value, 'none'))
+
+        except (ValueError, IndexError):
+            # Skip rows with invalid timestamps
+            continue
 
     return fault_rows
 
@@ -363,88 +391,87 @@ def convert_csv(input_file, output_file, min_time=None, max_time=None, fault_fil
         min_datetime = datetime.strptime(min_time, '%Y-%jT%H:%M:%S')
     if max_time:
         max_datetime = datetime.strptime(max_time, '%Y-%jT%H:%M:%S')
-    with open(input_file, 'r') as infile:
-        reader = csv.reader(infile)
+    reader = open_csv_file(input_file)
 
-        # Read first line (metadata) to extract base date
-        metadata_line = next(reader)
-        base_date_str = '2025-354T00:00:00'  # Default
+    # Read first line (metadata) to extract base date
+    metadata_line = next(reader)
+    base_date_str = '2025-354T00:00:00'  # Default
 
-        if metadata_line and len(metadata_line) >= 4:
-            # Parse base date from metadata line
-            # Format: 1P-120/240V-200A-60Hz,WINDOW_LVR50,DD/MM/YYYY,HH:MM:SS,V1.0
-            date_str = metadata_line[2].strip()
-            time_str = metadata_line[3].strip()
-            try:
-                # Parse DD/MM/YYYY format
-                base_dt = datetime.strptime(date_str, '%d/%m/%Y')
-                # Add time component
-                time_parts = time_str.split(':')
-                base_dt = base_dt.replace(
-                    hour=int(time_parts[0]) if len(time_parts) > 0 else 0,
-                    minute=int(time_parts[1]) if len(time_parts) > 1 else 0,
-                    second=int(time_parts[2].split('.')[0]) if len(time_parts) > 2 else 0
-                )
-                # Convert to ordinal format
-                base_date_str = base_dt.strftime('%Y-%jT%H:%M:%S')
-            except (ValueError, IndexError):
-                # If parsing fails, use default
-                base_date_str = '2025-354T00:00:00'
+    if metadata_line and len(metadata_line) >= 4:
+        # Parse base date from metadata line
+        # Format: 1P-120/240V-200A-60Hz,WINDOW_LVR50,DD/MM/YYYY,HH:MM:SS,V1.0
+        date_str = metadata_line[2].strip()
+        time_str = metadata_line[3].strip()
+        try:
+            # Parse DD/MM/YYYY format
+            base_dt = datetime.strptime(date_str, '%d/%m/%Y')
+            # Add time component
+            time_parts = time_str.split(':')
+            base_dt = base_dt.replace(
+                hour=int(time_parts[0]) if len(time_parts) > 0 else 0,
+                minute=int(time_parts[1]) if len(time_parts) > 1 else 0,
+                second=int(time_parts[2].split('.')[0]) if len(time_parts) > 2 else 0
+            )
+            # Convert to ordinal format
+            base_date_str = base_dt.strftime('%Y-%jT%H:%M:%S')
+        except (ValueError, IndexError):
+            # If parsing fails, use default
+            base_date_str = '2025-354T00:00:00'
 
-        # Read column headers
-        headers = next(reader)
+    # Read column headers
+    headers = next(reader)
 
-        # Find indices
-        time_col_idx = len(headers) - 1  # Last column
-        recnr_col_idx = 0  # First column
+    # Find indices
+    time_col_idx = len(headers) - 1  # Last column
+    recnr_col_idx = 0  # First column
 
-        # Get data column names (exclude RecNr and Time)
-        data_columns = []
-        for i, header in enumerate(headers):
-            if i != recnr_col_idx and i != time_col_idx:
-                name, unit = extract_unit_from_column_name(header)
-                data_columns.append((i, name, unit))
+    # Get data column names (exclude RecNr and Time)
+    data_columns = []
+    for i, header in enumerate(headers):
+        if i != recnr_col_idx and i != time_col_idx:
+            name, unit = extract_unit_from_column_name(header)
+            data_columns.append((i, name, unit))
 
-        # Collect all output rows for sorting
-        all_rows = []
+    # Collect all output rows for sorting
+    all_rows = []
 
-        # Add fault data (already filtered during parsing)
-        all_rows.extend(fault_data)
+    # Add fault data (already filtered during parsing)
+    all_rows.extend(fault_data)
 
-        # Process and collect data rows
-        for row in reader:
-            if not row or len(row) < len(headers):
-                continue
+    # Process and collect data rows
+    for row in reader:
+        if not row or len(row) < len(headers):
+            continue
 
-            time_value = row[time_col_idx]
-            # Convert time offset to full SCET timestamp using base date from file header
-            scet_timestamp = parse_time_offset_to_scet(time_value, base_date_str)
-            scet_datetime = datetime.strptime(scet_timestamp, '%Y-%jT%H:%M:%S')
+        time_value = row[time_col_idx]
+        # Convert time offset to full SCET timestamp using base date from file header
+        scet_timestamp = parse_time_offset_to_scet(time_value, base_date_str)
+        scet_datetime = datetime.strptime(scet_timestamp, '%Y-%jT%H:%M:%S')
 
-            # Apply time filtering
-            if min_datetime and scet_datetime < min_datetime:
-                continue
-            if max_datetime and scet_datetime > max_datetime:
-                continue
+        # Apply time filtering
+        if min_datetime and scet_datetime < min_datetime:
+            continue
+        if max_datetime and scet_datetime > max_datetime:
+            continue
 
-            # For each data column, collect an output row
-            for col_idx, col_name, col_unit in data_columns:
-                value = row[col_idx]
-                all_rows.append((scet_timestamp, col_name, value, col_unit))
+        # For each data column, collect an output row
+        for col_idx, col_name, col_unit in data_columns:
+            value = row[col_idx]
+            all_rows.append((scet_timestamp, col_name, value, col_unit))
 
-        # Sort all rows by timestamp (first element of tuple)
-        all_rows.sort(key=lambda x: datetime.strptime(x[0], '%Y-%jT%H:%M:%S'))
+    # Sort all rows by timestamp (first element of tuple)
+    all_rows.sort(key=lambda x: datetime.strptime(x[0], '%Y-%jT%H:%M:%S'))
 
-        # Write sorted data to output file
-        with open(output_file, 'w', newline='') as outfile:
-            writer = csv.writer(outfile)
+    # Write sorted data to output file
+    with open(output_file, 'w', newline='') as outfile:
+        writer = csv.writer(outfile)
 
-            # Write output header
-            writer.writerow(['scet', 'name', 'value', 'unit'])
+        # Write output header
+        writer.writerow(['scet', 'name', 'value', 'unit'])
 
-            # Write all sorted rows
-            for row in all_rows:
-                writer.writerow(row)
+        # Write all sorted rows
+        for row in all_rows:
+            writer.writerow(row)
 
 
 def convert_log_to_csv(log_file, csv_file):
@@ -477,99 +504,98 @@ def get_time_range_from_csv(csv_file, is_fault_file=False):
     max_dt = None
 
     try:
-        with open(csv_file, 'r', encoding='utf-8') as f:
-            reader = csv.reader(f)
+        reader = open_csv_file(csv_file)
 
-            # Read first line (metadata) to extract base date for data files
-            metadata_line = next(reader, None)
-            base_date_str = None
+        # Read first line (metadata) to extract base date for data files
+        metadata_line = next(reader, None)
+        base_date_str = None
 
-            if not is_fault_file and metadata_line:
-                # Parse base date from metadata line
-                # Format: 1P-120/240V-200A-60Hz,WINDOW_LVR50,DD/MM/YYYY,HH:MM:SS,V1.0
-                if len(metadata_line) >= 4:
-                    date_str = metadata_line[2].strip()
-                    time_str = metadata_line[3].strip()
-                    try:
-                        # Parse DD/MM/YYYY format
-                        base_dt = datetime.strptime(date_str, '%d/%m/%Y')
-                        # Add time component
-                        time_parts = time_str.split(':')
-                        base_dt = base_dt.replace(
-                            hour=int(time_parts[0]) if len(time_parts) > 0 else 0,
-                            minute=int(time_parts[1]) if len(time_parts) > 1 else 0,
-                            second=int(time_parts[2].split('.')[0]) if len(time_parts) > 2 else 0
-                        )
-                        # Convert to ordinal format
-                        base_date_str = base_dt.strftime('%Y-%jT%H:%M:%S')
-                    except (ValueError, IndexError):
-                        # If parsing fails, use default
-                        base_date_str = '2025-354T00:00:00'
+        if not is_fault_file and metadata_line:
+            # Parse base date from metadata line
+            # Format: 1P-120/240V-200A-60Hz,WINDOW_LVR50,DD/MM/YYYY,HH:MM:SS,V1.0
+            if len(metadata_line) >= 4:
+                date_str = metadata_line[2].strip()
+                time_str = metadata_line[3].strip()
+                try:
+                    # Parse DD/MM/YYYY format
+                    base_dt = datetime.strptime(date_str, '%d/%m/%Y')
+                    # Add time component
+                    time_parts = time_str.split(':')
+                    base_dt = base_dt.replace(
+                        hour=int(time_parts[0]) if len(time_parts) > 0 else 0,
+                        minute=int(time_parts[1]) if len(time_parts) > 1 else 0,
+                        second=int(time_parts[2].split('.')[0]) if len(time_parts) > 2 else 0
+                    )
+                    # Convert to ordinal format
+                    base_date_str = base_dt.strftime('%Y-%jT%H:%M:%S')
+                except (ValueError, IndexError):
+                    # If parsing fails, use default
+                    base_date_str = '2025-354T00:00:00'
 
-            # Skip second line (metadata for fault files, headers for data files)
+        # Skip second line (metadata for fault files, headers for data files)
+        next(reader, None)
+
+        # For fault files, skip third line (column headers)
+        if is_fault_file:
             next(reader, None)
 
-            # For fault files, skip third line (column headers)
-            if is_fault_file:
-                next(reader, None)
+        for row in reader:
+            if not row:
+                continue
 
-            for row in reader:
-                if not row:
-                    continue
+            try:
+                if is_fault_file:
+                    # Fault file: columns 2 and 3 for date/time
+                    if len(row) < 4:
+                        continue
+                    date_part = row[1].strip()
+                    time_part = row[2].strip()
 
-                try:
-                    if is_fault_file:
-                        # Fault file: columns 2 and 3 for date/time
-                        if len(row) < 4:
-                            continue
-                        date_part = row[1].strip()
-                        time_part = row[2].strip()
-
-                        # Parse date (handle various formats)
-                        if '-' in date_part and len(date_part.split('-')) == 2:
-                            # Ordinal format
-                            dt = datetime.strptime(f"{date_part}T{time_part}", '%Y-%jT%H:%M:%S')
-                        elif '/' in date_part:
+                    # Parse date (handle various formats)
+                    if '-' in date_part and len(date_part.split('-')) == 2:
+                        # Ordinal format
+                        dt = datetime.strptime(f"{date_part}T{time_part}", '%Y-%jT%H:%M:%S')
+                    elif '/' in date_part:
+                        try:
+                            dt = datetime.strptime(date_part, '%m/%d/%Y')
+                        except ValueError:
                             try:
-                                dt = datetime.strptime(date_part, '%m/%d/%Y')
+                                dt = datetime.strptime(date_part, '%d/%m/%Y')
                             except ValueError:
-                                try:
-                                    dt = datetime.strptime(date_part, '%d/%m/%Y')
-                                except ValueError:
-                                    dt = datetime.strptime(date_part, '%Y/%m/%d')
-                            time_parts = time_part.split(':')
-                            dt = dt.replace(
-                                hour=int(time_parts[0]),
-                                minute=int(time_parts[1]),
-                                second=int(time_parts[2].split('.')[0]) if len(time_parts) > 2 else 0
-                            )
-                        else:
-                            dt = datetime.strptime(date_part, '%Y-%m-%d')
-                            time_parts = time_part.split(':')
-                            dt = dt.replace(
-                                hour=int(time_parts[0]),
-                                minute=int(time_parts[1]),
-                                second=int(time_parts[2].split('.')[0]) if len(time_parts) > 2 else 0
-                            )
+                                dt = datetime.strptime(date_part, '%Y/%m/%d')
+                        time_parts = time_part.split(':')
+                        dt = dt.replace(
+                            hour=int(time_parts[0]),
+                            minute=int(time_parts[1]),
+                            second=int(time_parts[2].split('.')[0]) if len(time_parts) > 2 else 0
+                        )
                     else:
-                        # Data file: last column is time
-                        if len(row) < 2:
-                            continue
-                        time_value = row[-1].strip()
-                        # Use base date from file header
-                        if base_date_str:
-                            dt_str = parse_time_offset_to_scet(time_value, base_date_str)
-                        else:
-                            dt_str = parse_time_offset_to_scet(time_value)
-                        dt = datetime.strptime(dt_str, '%Y-%jT%H:%M:%S')
+                        dt = datetime.strptime(date_part, '%Y-%m-%d')
+                        time_parts = time_part.split(':')
+                        dt = dt.replace(
+                            hour=int(time_parts[0]),
+                            minute=int(time_parts[1]),
+                            second=int(time_parts[2].split('.')[0]) if len(time_parts) > 2 else 0
+                        )
+                else:
+                    # Data file: last column is time
+                    if len(row) < 2:
+                        continue
+                    time_value = row[-1].strip()
+                    # Use base date from file header
+                    if base_date_str:
+                        dt_str = parse_time_offset_to_scet(time_value, base_date_str)
+                    else:
+                        dt_str = parse_time_offset_to_scet(time_value)
+                    dt = datetime.strptime(dt_str, '%Y-%jT%H:%M:%S')
 
-                    if min_dt is None or dt < min_dt:
-                        min_dt = dt
-                    if max_dt is None or dt > max_dt:
-                        max_dt = dt
+                if min_dt is None or dt < min_dt:
+                    min_dt = dt
+                if max_dt is None or dt > max_dt:
+                    max_dt = dt
 
-                except (ValueError, IndexError):
-                    continue
+            except (ValueError, IndexError):
+                continue
 
     except FileNotFoundError:
         return None, None
@@ -783,7 +809,7 @@ def process_directory_mode(directory, output_file, margin=None, overlap_policy='
 
             # Read the output file
             all_rows = []
-            with open(output_file, 'r') as f:
+            with open(output_file, 'r', encoding='utf-8', errors='ignore') as f:
                 reader = csv.reader(f)
                 next(reader)  # Skip header
                 for row in reader:
@@ -891,7 +917,7 @@ def process_directory_mode(directory, output_file, margin=None, overlap_policy='
                 )
 
                 # Read the temporary file and collect rows
-                with open(temp_path, 'r') as f:
+                with open(temp_path, 'r', encoding='utf-8', errors='ignore') as f:
                     reader = csv.reader(f)
                     next(reader)  # Skip header
                     for row in reader:
@@ -937,6 +963,146 @@ def process_directory_mode(directory, output_file, margin=None, overlap_policy='
             print(f"  Merged {len(all_rows)} rows from {len(overlapping_files)} files")
 
     return True
+
+
+def generate_summary_html(input_files, output_file, fault_file=None):
+    """
+    Generate HTML page showing input and output files.
+
+    Args:
+        input_files: List of input file paths
+        output_file: Output file path
+        fault_file: Optional fault file path
+
+    Returns:
+        HTML string
+    """
+    # Convert paths to absolute paths for display
+    input_files_html = ""
+    for input_file in input_files:
+        abs_path = Path(input_file).absolute()
+        input_files_html += f"    {abs_path}<br>\n"
+
+    output_abs = Path(output_file).absolute()
+
+    fault_section = ""
+    if fault_file:
+        fault_abs = Path(fault_file).absolute()
+        fault_section = f"""
+<div style="margin-bottom: 20px;">
+    <strong>Fault File:</strong><br>
+    {fault_abs}
+</div>
+"""
+
+    html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>PacVolt Analysis - File Summary</title>
+    <style>
+        body {{
+            margin: 0;
+            padding: 20px;
+            font-family: 'Courier New', monospace;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }}
+        .container {{
+            max-width: 1200px;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 30px;
+            border-radius: 10px;
+        }}
+        h1 {{
+            margin-top: 0;
+            font-size: 32px;
+        }}
+        .section {{
+            margin-bottom: 30px;
+        }}
+        strong {{
+            font-size: 18px;
+            display: block;
+            margin-bottom: 10px;
+        }}
+        .file-path {{
+            background: rgba(0, 0, 0, 0.2);
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 14px;
+            word-break: break-all;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>PacVolt Analysis - File Summary</h1>
+
+        <div class="section">
+            <strong>Input Files:</strong>
+            <div class="file-path">
+{input_files_html}            </div>
+        </div>
+
+        {fault_section}
+
+        <div class="section">
+            <strong>Output File:</strong>
+            <div class="file-path">
+                {output_abs}
+            </div>
+        </div>
+
+        <div style="margin-top: 40px; font-size: 14px; opacity: 0.8;">
+            Processing completed successfully!
+        </div>
+    </div>
+</body>
+</html>
+"""
+    return html
+
+
+def start_web_server(input_files, output_file, fault_file=None, port=5000):
+    """
+    Start a Flask web server to display file summary.
+
+    Args:
+        input_files: List of input file paths
+        output_file: Output file path
+        fault_file: Optional fault file path
+        port: Port to run the server on (default 5000)
+    """
+    app = Flask(__name__)
+
+    html_content = generate_summary_html(input_files, output_file, fault_file)
+
+    @app.route('/')
+    def summary():
+        return html_content
+
+    # Suppress Flask development server warning
+    import logging
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.ERROR)
+
+    print("=" * 60)
+    print("Starting web server...")
+    print("=" * 60)
+    print(f"Access the file summary at: http://localhost:{port}")
+    print("Press Ctrl+C to stop the server")
+    print("=" * 60)
+
+    # Open browser after a short delay
+    def open_browser():
+        time.sleep(1)
+        webbrowser.open(f'http://localhost:{port}')
+
+    threading.Thread(target=open_browser, daemon=True).start()
+
+    # Run the server
+    app.run(host='0.0.0.0', port=port, debug=False)
 
 
 def main():
@@ -1056,6 +1222,12 @@ Examples:
              'Fault data will be inserted before other data.'
     )
 
+    parser.add_argument(
+        '--no-browser',
+        action='store_true',
+        help='Skip opening the browser with file summary after processing'
+    )
+
     args = parser.parse_args()
 
     # Validate argument combinations
@@ -1101,6 +1273,22 @@ Examples:
                 print("\n" + "=" * 60)
                 print("✓ Conversion completed successfully!")
                 print("=" * 60)
+
+            # Collect input files for display
+            input_files = []
+            for data_file in ['24HR.csv', '24prev.csv', 'Month.csv']:
+                file_path = dir_path / data_file
+                if file_path.exists():
+                    input_files.append(file_path)
+
+            fault_file = dir_path / 'FaultLog.csv'
+            if not fault_file.exists():
+                fault_file = None
+
+            # Start web server unless --no-browser is specified
+            if not args.no_browser:
+                start_web_server(input_files, output_path, fault_file=fault_file, port=5000)
+
             sys.exit(0)
         else:
             sys.exit(1)
@@ -1140,6 +1328,11 @@ Examples:
                        fault_file=fault_path)
             if args.verbose:
                 print("Conversion completed successfully!")
+
+            # Start web server unless --no-browser is specified
+            if not args.no_browser:
+                start_web_server([input_path], output_path, fault_file=fault_path, port=5000)
+
         except Exception as e:
             print(f"Error during conversion: {e}", file=sys.stderr)
             sys.exit(1)
